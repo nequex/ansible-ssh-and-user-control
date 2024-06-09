@@ -1,0 +1,133 @@
+---
+- name: sshkey distribution
+  hosts: Confluence*
+  vars:
+    - lange_var: "User_Alias IT_ADMINS = "
+  vars_files:
+    - ./vars/sshkey_variables.yml
+    - ./vars/whitelist.yml
+
+
+  tasks:
+
+  ### Gets the Usernames of all our ADMIN Accounts
+    - name: "Initial It_admin list"
+      debug:
+        var: users
+        
+    - name: "Extract usernames from It_admin  list"
+      set_fact:
+        user_names: "{{ users | map(attribute='name') | list }}" 
+    - debug:
+        msg: "{{ user_names }}"             
+
+  ### Gets the Usernames of all our SERVICE Accounts
+    - name: "Initial service_user list"
+      debug:
+        var: service_user
+        
+    - name: "Extract usernames from service_user list"
+      set_fact:
+        service_user_list: "{{ service_user | map(attribute='name') | list }}" 
+    - debug:
+        msg: "{{ service_user_list }}"             
+
+  ### Gets the Usernames of all Accounts on the Server
+    - name: "Gather existing users"
+      command: "grep -v -e /sbin/nologin -e /sbin/halt -e /bin/sync -e /bin/false -e /sbin/shutdown /etc/passwd"
+      register: existing_users
+
+  ### Cleans up all the Usernames
+    - name: "Set existing user list"
+      set_fact:
+        existing_users: "{{ existing_users.stdout_lines | map('regex_replace', '^([^:]+):.*$', '\\1') | list }}"
+    - debug:
+        msg: "{{ existing_users }}"
+      ignore_errors: no
+
+  ### Gets the difference between all our ADMIN Accounts and the usernames on the Server
+    - name: "Remove items with it_admin_list"
+      set_fact:
+        existing_usernames_for_deletion: "{{ existing_users | difference(user_names) }}"
+    - debug:
+        msg: "{{ existing_usernames_for_deletion }}"
+      ignore_errors: no        
+
+  ### Gets the difference between all our SERVICE Accounts and the usernames on the Server
+    - name: "Remove items with service_user_list"
+      set_fact:
+        existing_usernames_for_deletion: "{{ existing_usernames_for_deletion | difference(service_user_list) }}"
+    - debug:
+        msg: "{{ existing_usernames_for_deletion }}"
+      ignore_errors: no  
+
+  ### Gets the difference between all our usernames on the Server and the ADMIN Accounts
+    - name: "Check for missing admin_users"
+      set_fact:
+        admin_users_to_add: "{{ user_names | difference(existing_users) }}"
+    - debug:
+        msg: "{{ admin_users_to_add }}"
+      ignore_errors: no     
+
+  ### Figures out which ADMIN users are missing and writes them into an variable
+    - name: "Filter users to create"
+      set_fact:
+        users_to_create: "{{ users | selectattr('name', 'in', admin_users_to_add) | list }}"
+
+  ### This creates an concatinated string of the lange_var and each ADMIN name to paste it into the /etc/sudoers.d/IT_ADMINS file
+    - name: Create sudoers.d string
+      set_fact:
+        lange_var : "{{ lange_var }}{{ item.name }}, "
+      loop: "{{ users }}"
+    - debug:
+        msg: "{{ lange_var }}"
+      ignore_errors: no
+
+
+  ### Creates all missing admin users
+    - name: Create all admin Users
+      ansible.builtin.user: 
+        name: "{{ item.name }}"
+        comment: Automated Admin User
+        uid: "{{ item.uid }}"
+        ssh_key_file: .ssh/authorized_keys
+      become: yes
+      ignore_errors: no
+      loop: "{{ users_to_create }}"
+
+  ### Sets sshkeys for all users, so that we can assure that the right sshkey is there for each ADMIN user
+    - name: Set sshkey for users
+      ansible.posix.authorized_key:
+        user: "{{ item.name }}"
+        state: present
+        key: "{{ item.sshkey }}"
+        exclusive: true
+      ignore_errors: yes
+      become: yes
+      loop: "{{ users }}"  
+
+  ### Defines the /bin/bash shell for each user
+    - name: use correct shell
+      ansible.builtin.shell: 'chsh -s /bin/bash {{ item.name }}' 
+      become: yes
+      ignore_errors: true
+      loop: "{{ users }}"
+
+
+  ### This adds the predefined string to the /etc/sudoers.d/IT_ADMINS file
+    - name: Added front of file
+      ansible.builtin.shell: 'echo -n "{{ lange_var }}" > /etc/sudoers.d/IT_ADMINS; sed -i "s/, $//" /etc/sudoers.d/IT_ADMINS ' 
+      become: yes
+      ignore_errors: no
+
+  ### Makes an return in the file
+    - name: add sudo rule
+      ansible.builtin.shell: 'echo "" >> /etc/sudoers.d/IT_ADMINS' 
+      become: yes
+      ignore_errors: true
+
+  ### Adds a sudo rule to the /etc/sudoers.d/IT_ADMINS file
+    - name: add sudo rule
+      ansible.builtin.shell: 'echo "IT_ADMINS ALL = (ALL) NOPASSWD: ALL" >> /etc/sudoers.d/IT_ADMINS' 
+      become: yes
+      ignore_errors: true
